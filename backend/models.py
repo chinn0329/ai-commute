@@ -25,6 +25,7 @@ class DayPlan(BaseModel):
     conflicts: List[str] = []
     recommendations: List[str] = []
     weather_advisory: Optional[str] = None
+    morning_briefing: Optional[str]=None
 
 class UserPreferences(BaseModel):
     user_id: str
