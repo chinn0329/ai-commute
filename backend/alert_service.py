@@ -200,3 +200,47 @@ if __name__ == "__main__":
             print("❌ Failed — check your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env")
 
     asyncio.run(test())
+async def get_telegram_updates() -> list:
+    """
+    Poll Telegram for new messages/locations sent by user.
+    """
+    url = f"{TELEGRAM_API}/getUpdates"
+    params = {"limit": 5, "timeout": 1}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("result", [])
+    except Exception as e:
+        print(f"[Alert] Error getting updates: {e}")
+        return []
+
+
+async def get_user_current_location() -> str:
+    """
+    Check if user has shared their location via Telegram.
+    Returns location as 'lat,lon' string or None.
+    """
+    updates = await get_telegram_updates()
+
+    for update in reversed(updates):
+        message = update.get("message", {})
+
+        # Check for shared location
+        location = message.get("location")
+        if location:
+            lat = location["latitude"]
+            lon = location["longitude"]
+            print(f"[Alert] Got user location: {lat}, {lon}")
+            return f"{lat},{lon}"
+
+        # Check for text location
+        text = message.get("text", "")
+        if text.startswith("📍") or text.lower().startswith("location:"):
+            loc = text.replace("📍", "").replace("location:", "").strip()
+            print(f"[Alert] Got user text location: {loc}")
+            return loc
+
+    return None

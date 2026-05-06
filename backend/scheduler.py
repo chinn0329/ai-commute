@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
-
+from alert_service import get_user_current_location
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from calendar_service  import get_todays_appointments
@@ -136,6 +136,7 @@ def schedule_departure_alert(
     job_id = f"alert_{appointment.id}"
 
     async def fire_alert():
+        
         try:
             print(f"[Scheduler] Firing departure alert for '{appointment.title}'")
             result = await reason_single_appointment(
@@ -176,7 +177,7 @@ async def run_traffic_recheck():
     print(f"[Scheduler] Traffic re-check — {now.strftime('%I:%M %p')} — {len(active_commutes)} active commutes")
 
     weather = await get_bangalore_weather()
-
+    user_location = await get_user_current_location()
     for appt_id, original_route in list(active_commutes.items()):
         # Find the appointment
         appt = next((a for a in todays_appointments if a.id == appt_id), None)
@@ -191,7 +192,9 @@ async def run_traffic_recheck():
         try:
             # Get fresh routes
             new_routes = await get_route_options(
-                origin="current location",
+                # Try to get live location from Telegram, fall back to .env
+                
+                origin = user_location or os.getenv("USER_HOME_LOCATION", "Indiranagar, Bangalore"),
                 destination=appt.location,
                 departure_time=now,
                 preferences=DEFAULT_PREFERENCES,
