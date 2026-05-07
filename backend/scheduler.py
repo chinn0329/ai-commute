@@ -48,38 +48,57 @@ DEFAULT_PREFERENCES = UserPreferences(
 async def run_morning_analysis():
     """
     Main morning job:
-    1. Read Google Calendar
-    2. Fetch routes for all appointments
-    3. Run Groq full-day reasoning
-    4. Send morning briefing to Telegram
-    5. Schedule departure alerts for each appointment
+    1. Request user location via Telegram
+    2. Wait for user to share location
+    3. Read Google Calendar
+    4. Fetch routes for all appointments
+    5. Run Groq full-day reasoning
+    6. Send morning briefing
+    7. Schedule departure alerts
     """
     global todays_appointments
 
     print(f"\n{'='*50}")
-    print(f"[Scheduler] Morning analysis starting — {datetime.now(IST).strftime('%I:%M %p')}")
+    print(f"[Scheduler] Morning analysis — {datetime.now(IST).strftime('%I:%M %p')}")
     print(f"{'='*50}")
 
     try:
-        # Step 1: Get appointments
+        # Step 1: Ask user to share location
+        from alert_service import request_user_location, get_user_current_location
+        await request_user_location()
+
+        # Step 2: Wait 2 minutes for user to respond
+        print("[Scheduler] Waiting 2 minutes for user to share location...")
+        await asyncio.sleep(120)
+
+        # Step 3: Read location
+        user_location = await get_user_current_location()
+        print(f"[Scheduler] Using location: {user_location}")
+
+        # Step 4: Get appointments
         appointments = get_todays_appointments()
         todays_appointments = appointments
 
         if not appointments:
-            print("[Scheduler] No appointments today — skipping analysis")
+            print("[Scheduler] No appointments today")
+            from alert_service import send_telegram_message
+            await send_telegram_message(
+                "🌅 <b>Good Morning!</b>\n\n"
+                "No appointments with locations found in your calendar today.\n"
+                "Add events with a location in Google Calendar to get commute alerts.\n\n"
+                "<i>— AI-Commute</i>"
+            )
             return
 
-        print(f"[Scheduler] Found {len(appointments)} appointments")
-
-        # Step 2: Get weather
+        # Step 5: Get weather
         weather = await get_bangalore_weather()
         avoid_modes = get_weather_mode_overrides(weather)
 
-        # Step 3: Get routes for all appointments
+        # Step 6: Get routes for all appointments
         all_routes = {}
         for appt in appointments:
             routes = await get_route_options(
-                origin="your home location",   # in full app: from user profile
+                origin=user_location,
                 destination=appt.location,
                 departure_time=appt.start_time - timedelta(hours=1),
                 preferences=DEFAULT_PREFERENCES,
@@ -87,30 +106,31 @@ async def run_morning_analysis():
             )
             all_routes[appt.id] = routes
 
-        # Step 4: Full day Groq reasoning
+        # Step 7: Full day Groq reasoning
         day_plan = await reason_full_day(
             appointments, all_routes, weather, DEFAULT_PREFERENCES
         )
 
-        # Step 5: Send morning briefing
+        # Step 8: Send morning briefing
         await send_morning_briefing(day_plan)
 
-        # Step 6: Send conflict alerts if any
+        # Step 9: Send conflict alerts
         for i, conflict in enumerate(day_plan.conflicts):
             if i < len(appointments):
                 await send_conflict_alert(conflict, appointments[i].title)
 
-        # Step 7: Schedule individual departure alerts
+        # Step 10: Schedule departure alerts
         for appt in appointments:
-            schedule_departure_alert(appt, all_routes.get(appt.id, []), weather)
+            schedule_departure_alert(
+                appt, all_routes.get(appt.id, []), weather, user_location
+            )
 
-        print(f"[Scheduler] Morning analysis complete ✅")
+        print("[Scheduler] Morning analysis complete ✅")
 
     except Exception as e:
         print(f"[Scheduler] Morning analysis error: {e}")
         import traceback
         traceback.print_exc()
-
 
 # ════════════════════════════════════════════════════════════════
 # DEPARTURE ALERT — scheduled per appointment
@@ -119,38 +139,47 @@ def schedule_departure_alert(
     appointment: Appointment,
     routes: List[RouteOption],
     weather: dict,
+    user_location: str,
     alert_minutes_before: int = 30,
 ):
-    """
-    Schedule a one-time departure alert for a specific appointment.
-    Fires 30 minutes before the appointment start time.
-    """
     alert_time = appointment.start_time - timedelta(minutes=alert_minutes_before)
-    now = datetime.now(IST)
+    now        = datetime.now(IST)
 
-    # Only schedule if alert time is in the future
     if alert_time <= now:
-        print(f"[Scheduler] Alert time for '{appointment.title}' already passed — skipping")
+        print(f"[Scheduler] Alert time passed for '{appointment.title}' — skipping")
         return
 
     job_id = f"alert_{appointment.id}"
 
     async def fire_alert():
-        
         try:
             print(f"[Scheduler] Firing departure alert for '{appointment.title}'")
+
+            # Get fresh location at alert time
+            from alert_service import get_user_current_location
+            fresh_location = await get_user_current_location()
+
+            # Re-fetch routes with fresh location
+            fresh_routes = await get_route_options(
+                origin=fresh_location,
+                destination=appointment.location,
+                departure_time=datetime.now(IST) + timedelta(minutes=30),
+                preferences=DEFAULT_PREFERENCES,
+                weather_avoid_modes=get_weather_mode_overrides(weather),
+            )
+
+            final_routes = fresh_routes if fresh_routes else routes
             result = await reason_single_appointment(
-                appointment, routes, weather, DEFAULT_PREFERENCES
+                appointment, final_routes, weather, DEFAULT_PREFERENCES
             )
             await send_departure_alert(appointment, result)
 
-            # Store active commute for re-routing tracking
-            best = get_best_route(routes)
+            best = get_best_route(final_routes)
             if best:
                 active_commutes[appointment.id] = best
 
         except Exception as e:
-            print(f"[Scheduler] Alert error for '{appointment.title}': {e}")
+            print(f"[Scheduler] Alert error: {e}")
 
     scheduler.add_job(
         fire_alert,
@@ -159,9 +188,7 @@ def schedule_departure_alert(
         id=job_id,
         replace_existing=True,
     )
-    print(f"[Scheduler] Departure alert scheduled for '{appointment.title}' at {alert_time.strftime('%I:%M %p')}")
-
-
+    print(f"[Scheduler] Alert scheduled for '{appointment.title}' at {alert_time.strftime('%I:%M %p')}")
 # ════════════════════════════════════════════════════════════════
 # TRAFFIC RE-CHECK — runs every 10 minutes
 # ════════════════════════════════════════════════════════════════
