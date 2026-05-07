@@ -41,7 +41,52 @@ DEFAULT_PREFERENCES = UserPreferences(
     low_battery=False,
 )
 
+async def wait_for_user_location(
+    timeout_seconds: int = 600,
+    poll_interval: int = 5,
+) -> str:
+    """
+    Poll Telegram every `poll_interval` seconds until:
+      - User shares a GPS pin   → returns "lat,lon"
+      - User types an address   → returns that text
+      - Timeout reached         → returns .env fallback
+    Fires immediately when location arrives — no fixed sleep.
+    """
+    from alert_service import get_telegram_updates
+    fallback = os.getenv("USER_HOME_LOCATION", "Indiranagar, Bangalore")
+    last_update_id = None
+    elapsed = 0
 
+    while elapsed < timeout_seconds:
+        updates = await get_telegram_updates(offset=last_update_id)
+
+        for update in updates:
+            last_update_id = update["update_id"] + 1  # advance offset so we don't re-read
+            message = update.get("message", {})
+
+            # Priority 1: GPS location pin
+            location = message.get("location")
+            if location:
+                lat = location["latitude"]
+                lon = location["longitude"]
+                loc_str = f"{lat},{lon}"
+                print(f"[Scheduler] ✅ GPS location received immediately: {loc_str}")
+                return loc_str
+
+            # Priority 2: Text address (ignore commands)
+            text = message.get("text", "").strip()
+            if text and not text.startswith("/"):
+                print(f"[Scheduler] ✅ Text location received: {text}")
+                return text
+
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        remaining = timeout_seconds - elapsed
+        if elapsed % 60 == 0:  # log every minute so you can see it's alive
+            print(f"[Scheduler] Still waiting for location... ({remaining}s remaining)")
+
+    print(f"[Scheduler] ⏱ Timeout — using fallback: {fallback}")
+    return fallback
 # ════════════════════════════════════════════════════════════════
 # MORNING ANALYSIS — runs at 5:00 AM daily
 # ════════════════════════════════════════════════════════════════
@@ -67,12 +112,9 @@ async def run_morning_analysis():
         from alert_service import request_user_location, get_user_current_location
         await request_user_location()
 
-        # Step 2: Wait 2 minutes for user to respond
-        print("[Scheduler] Waiting 2 minutes for user to share location...")
-        await asyncio.sleep(120)
-
-        # Step 3: Read location
-        user_location = await get_user_current_location()
+        # Step 2: Poll for location — fires as soon as user shares, max 10 min wait
+        print("[Scheduler] Waiting for user to share location (max 10 min)...")
+        user_location = await wait_for_user_location(timeout_seconds=600, poll_interval=5)
         print(f"[Scheduler] Using location: {user_location}")
 
         # Step 4: Get appointments
@@ -172,7 +214,7 @@ def schedule_departure_alert(
             result = await reason_single_appointment(
                 appointment, final_routes, weather, DEFAULT_PREFERENCES
             )
-            await send_departure_alert(appointment, result)
+            await send_departure_alert(appointment, result, all_routes=final_routes)
 
             best = get_best_route(final_routes)
             if best:
@@ -291,4 +333,46 @@ if __name__ == "__main__":
         await run_morning_analysis()
         print("\n✅ Manual morning analysis complete")
 
+    async def test_departure_alert_now():
+        """
+        Fires a departure alert immediately for the first appointment found.
+        Use this to test route display in Telegram without waiting 30 min.
+        """
+        print("Testing departure alert NOW...\n")
+
+        from alert_service import request_user_location
+        await request_user_location()
+
+        print("Waiting for your location (max 2 min)...")
+        user_location = await wait_for_user_location(timeout_seconds=120, poll_interval=3)
+        print(f"Location: {user_location}")
+
+        appointments = get_todays_appointments()
+        if not appointments:
+            print("No appointments found in calendar today.")
+            return
+
+        appt = appointments[0]
+        print(f"Using appointment: {appt.title} at {appt.location}")
+
+        weather = await get_bangalore_weather()
+        avoid_modes = get_weather_mode_overrides(weather)
+
+        routes = await get_route_options(
+            origin=user_location,
+            destination=appt.location,
+            departure_time=datetime.now(IST) + timedelta(minutes=30),
+            preferences=DEFAULT_PREFERENCES,
+            weather_avoid_modes=avoid_modes,
+        )
+
+        print(f"\nRoutes fetched: {len(routes)}")
+        for r in routes:
+            print(f"  {r.mode} — {r.duration_minutes}min — ₹{r.cost_inr}")
+
+        result = await reason_single_appointment(appt, routes, weather, DEFAULT_PREFERENCES)
+        await send_departure_alert(appt, result, all_routes=routes)
+        print("\n✅ Departure alert sent — check Telegram!")
+
+    # ← CHANGE THIS LINE to switch between tests
     asyncio.run(test())

@@ -12,6 +12,34 @@ TELEGRAM_API       = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 # Global — stores the latest known user location
 latest_user_location: str = None
 
+def format_route_options(routes: list) -> str:
+    """
+    Format a list of RouteOption objects into a readable Telegram string.
+    Shows all available modes with duration and cost.
+    """
+    if not routes:
+        return "No route options available."
+
+    mode_emojis = {
+        "cab":               "🚕",
+        "metro_auto_hybrid": "🚇",
+        "bus":               "🚌",
+        "walk":              "🚶",
+        "metro_bus":         "🚇",
+        "auto":              "🛺",
+    }
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+
+    lines = []
+    for i, route in enumerate(routes[:4]):  # max 4 options
+        num   = number_emojis[i] if i < len(number_emojis) else f"{i+1}."
+        emoji = mode_emojis.get(route.mode, "🚗")
+        label = route.mode.replace("_", " ").title()
+        cost  = f"₹{route.cost_inr}" if route.cost_inr else "Free"
+        arrive = route.arrival_time.strftime("%I:%M %p") if route.arrival_time else "—"
+        lines.append(f"{num} {emoji} <b>{label}</b> — {route.duration_minutes} min — {cost} — arrives {arrive}")
+
+    return "\n".join(lines)
 
 async def send_telegram_message(text: str, chat_id: str = None) -> bool:
     target = chat_id or TELEGRAM_CHAT_ID
@@ -200,7 +228,11 @@ async def send_morning_briefing(day_plan) -> bool:
     return await send_telegram_message("\n".join(lines))
 
 
-async def send_departure_alert(appointment, reasoning_result: dict) -> bool:
+async def send_departure_alert(
+    appointment,
+    reasoning_result: dict,
+    all_routes: list = None,       # ← NEW: pass full route list here
+) -> bool:
     mode_emojis = {
         "cab":               "🚕",
         "metro_auto_hybrid": "🚇",
@@ -216,6 +248,15 @@ async def send_departure_alert(appointment, reasoning_result: dict) -> bool:
     cost      = reasoning_result.get("cost_inr", "?")
     alert_msg = reasoning_result.get("alert_message", "")
 
+    # Build route options block
+    if all_routes:
+        route_block = (
+            f"\n🛣 <b>All Route Options:</b>\n"
+            f"{format_route_options(all_routes)}\n"
+        )
+    else:
+        route_block = ""
+
     message = (
         f"{emoji} <b>Departure Alert — AI-Commute</b>\n"
         f"\n"
@@ -223,10 +264,10 @@ async def send_departure_alert(appointment, reasoning_result: dict) -> bool:
         f"📌 {appointment.location}\n"
         f"🕐 Starts: {appointment.start_time.strftime('%I:%M %p')}\n"
         f"\n"
-        f"🗺 <b>Best Route: {mode.replace('_', ' ').title()}</b>\n"
-        f"⏱ Duration: {duration} min\n"
-        f"💰 Cost: ₹{cost}\n"
+        f"✅ <b>Recommended: {mode.replace('_', ' ').title()}</b>\n"
+        f"⏱ Duration: {duration} min  |  💰 Cost: ₹{cost}\n"
         f"🚀 <b>Leave by: {departure}</b>\n"
+        f"{route_block}"
         f"\n"
         f"{alert_msg}\n"
         f"\n"
