@@ -12,3 +12,4 @@ dist/
 build/
 token.json
 credentials.json
+temp.env
