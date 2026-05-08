@@ -19,7 +19,14 @@ BASE_DIR = Path(__file__).parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 
-
+# Production: write credentials.json from env variable
+import base64, json as _json
+creds_b64 = os.getenv("GOOGLE_CREDENTIALS_B64")
+if creds_b64 and not CREDENTIALS_PATH.exists():
+    creds_data = base64.b64decode(creds_b64).decode()
+    with open(CREDENTIALS_PATH, "w") as f:
+        f.write(creds_data)
+    print("[Calendar] credentials.json written from environment")
 def get_calendar_service():
     """
     Authenticate and return a Google Calendar service object.
