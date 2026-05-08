@@ -139,15 +139,13 @@ Respond in this exact JSON format:
 # 2. FULL DAY LOGISTICS REASONING
 # ════════════════════════════════════════════════════════════════
 async def reason_full_day(
-    appointments: List[Appointment],
-    all_routes: dict,
-    weather: dict,
-    preferences: Optional[UserPreferences] = None,
+    appointments,
+    all_routes,
+    weather,
+    preferences=None,
 ) -> DayPlan:
     """
-    Reason across ALL appointments for the day as a connected logistics chain.
-    Detects conflicts, scores feasibility, recommends buffers.
-    Returns a DayPlan object.
+    Full day reasoning using OpenClaw context object.
     """
     if not appointments:
         return DayPlan(
@@ -157,72 +155,36 @@ async def reason_full_day(
             recommendations=["No appointments today. Enjoy your day!"],
         )
 
-    # Build appointment summary for prompt
-    appt_text = format_appointments(appointments)
+    # Use OpenClaw context if available
+    try:
+        from openclaw_context import build_groq_system_prompt, get_context_state
+        context_state = get_context_state()
+        use_openclaw  = context_state["last_assembled"] is not None
+    except ImportError:
+        use_openclaw = False
 
-    # Build routes summary
-    routes_text = ""
-    for appt in appointments:
-        appt_routes = all_routes.get(appt.id, [])
-        routes_text += f"\nRoutes for '{appt.title}':\n{format_routes(appt_routes)}"
-
-    weather_text = (
-        f"{weather['description']}, {weather['temperature_c']}°C. "
-        f"Raining: {weather['is_raining']}. "
-        f"Advisory: {weather.get('advisory') or 'None'}."
-    )
-
-    pref_text = "No specific preferences."
-    if preferences:
-        pref_text = f"Optimization: {preferences.optimization}. Avoid cabs: {preferences.avoid_cabs}."
-
-    prompt = f"""You are AI-Commute, a smart day logistics assistant for Bangalore professionals.
-Analyse the user's ENTIRE workday as a connected logistics chain.
-
+    prompt_suffix = f"""
 TODAY'S APPOINTMENTS:
-{appt_text}
+{format_appointments(appointments)}
 
-AVAILABLE ROUTES:
-{routes_text}
+ROUTES:
+{"".join(f"Routes for '{a.title}': {chr(10)}{format_routes(all_routes.get(a.id,[]))}{chr(10)}" for a in appointments)}
 
-BANGALORE WEATHER TODAY:
-{weather_text}
-
-USER PREFERENCES:
-{pref_text}
-
-YOUR TASK — analyse the full day and identify:
-1. FEASIBILITY SCORE: What % chance does the user have of making all meetings on time? (0.0 to 1.0)
-2. CONFLICTS: Which meeting transitions are impossible or risky? (e.g. not enough travel time between meetings)
-3. RECOMMENDATIONS: Specific actionable advice (leave early, take metro, add buffer, reschedule)
-4. WEATHER ADVISORY: Any weather impact on the day
-
-Important Bangalore context:
-- Silk Board junction and ORR are heavily congested during 8-10 AM and 5-8 PM
-- Namma Metro Purple Line: Whitefield to Chalukya. Green Line: Nagasandra to Silk Institute
-- BMTC buses run on most major routes but are slower during peak hours
-- Auto rickshaws are best for last mile (under 5 km)
+WEATHER: {weather['description']}, {weather['temperature_c']}°C, raining: {weather['is_raining']}
 
 Respond in this exact JSON format:
 {{
   "feasibility_score": 0.75,
-  "feasibility_label": "Moderate — 2 meetings at risk",
-  "conflicts": [
-    "Meeting 2 ends at 12:00 PM but Meeting 3 is at 1:00 PM in Whitefield — only 60 min gap but travel takes 75 min in current traffic",
-    "ORR likely congested during your 5 PM departure"
-  ],
-  "recommendations": [
-    "Leave Meeting 2 by 11:45 AM to reach Meeting 3 on time",
-    "Consider Metro for the Indiranagar to Whitefield leg — avoids ORR entirely",
-    "Add 30 min buffer before your 5 PM Electronic City meeting"
-  ],
-  "weather_advisory": "Clear weather — all modes available",
-  "morning_briefing": "A friendly 4-5 line morning summary message for Telegram/WhatsApp"
+  "feasibility_label": "Moderate — 1 meeting at risk",
+  "conflicts": ["conflict description here"],
+  "recommendations": ["actionable recommendation here"],
+  "weather_advisory": "weather impact here",
+  "morning_briefing": "friendly 4-5 line morning message for Telegram"
 }}"""
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": prompt_suffix}],
         temperature=0.4,
         max_tokens=800,
     )
@@ -243,25 +205,18 @@ Respond in this exact JSON format:
             recommendations=result.get("recommendations", []),
             weather_advisory=result.get("weather_advisory"),
         )
-
-        print(f"[Reasoning] Day feasibility: {result.get('feasibility_label', 'Unknown')}")
-        print(f"[Reasoning] Conflicts found: {len(plan.conflicts)}")
-        print(f"[Reasoning] Recommendations: {len(plan.recommendations)}")
-
-        # Attach morning briefing to plan
-        plan.morning_briefing = result.get("morning_briefing", "Good morning! Here is your day plan.")
+        plan.morning_briefing = result.get("morning_briefing", "Good morning!")
         return plan
 
     except Exception as e:
-        print(f"[Reasoning] Full day parse error: {e}\nRaw: {raw}")
+        print(f"[Reasoning] Parse error: {e}")
         return DayPlan(
             appointments=appointments,
             feasibility_score=0.7,
-            conflicts=["Could not analyse conflicts — check your schedule manually"],
-            recommendations=["Leave 30 min early for each appointment to be safe"],
+            conflicts=["Could not analyse — check schedule manually"],
+            recommendations=["Leave 30 min early for each appointment"],
             weather_advisory=weather.get("advisory"),
         )
-
 
 # ════════════════════════════════════════════════════════════════
 # 3. DYNAMIC RE-ROUTING REASONING

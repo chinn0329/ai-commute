@@ -91,16 +91,6 @@ async def wait_for_user_location(
 # MORNING ANALYSIS — runs at 5:00 AM daily
 # ════════════════════════════════════════════════════════════════
 async def run_morning_analysis():
-    """
-    Main morning job:
-    1. Request user location via Telegram
-    2. Wait for user to share location
-    3. Read Google Calendar
-    4. Fetch routes for all appointments
-    5. Run Groq full-day reasoning
-    6. Send morning briefing
-    7. Schedule departure alerts
-    """
     global todays_appointments
 
     print(f"\n{'='*50}")
@@ -108,69 +98,104 @@ async def run_morning_analysis():
     print(f"{'='*50}")
 
     try:
-        # Step 1: Ask user to share location
+        # Step 1: Request location
         from alert_service import request_user_location, get_user_current_location
         await request_user_location()
+        print("[Scheduler] Waiting 2 minutes for location...")
+        await asyncio.sleep(120)
 
-        # Step 2: Poll for location — fires as soon as user shares, max 10 min wait
-        print("[Scheduler] Waiting for user to share location (max 10 min)...")
-        user_location = await wait_for_user_location(timeout_seconds=600, poll_interval=5)
-        print(f"[Scheduler] Using location: {user_location}")
+        # Step 2: Get location
+        user_location = await get_user_current_location()
+        print(f"[Scheduler] Location: {user_location}")
 
-        # Step 4: Get appointments
-        appointments = get_todays_appointments()
+        # Step 3: Run OpenClaw context assembly pipeline
+        from openclaw_context import assemble_context, build_groq_system_prompt
+        print("[Scheduler] Running OpenClaw context assembly...")
+        context = await assemble_context(
+            user_location=user_location,
+            preferences=DEFAULT_PREFERENCES,
+        )
+
+        # Step 4: Extract assembled data
+        from models import Appointment
+        appointments = []
+        for a in context["appointments"]:
+            appointments.append(Appointment(
+                id=a["id"],
+                title=a["title"],
+                location=a["location"],
+                start_time=datetime.fromisoformat(a["start_time"]),
+                end_time=datetime.fromisoformat(a["end_time"]),
+            ))
         todays_appointments = appointments
 
         if not appointments:
-            print("[Scheduler] No appointments today")
             from alert_service import send_telegram_message
             await send_telegram_message(
                 "🌅 <b>Good Morning!</b>\n\n"
-                "No appointments with locations found in your calendar today.\n"
-                "Add events with a location in Google Calendar to get commute alerts.\n\n"
-                "<i>— AI-Commute</i>"
+                "No appointments found for today.\n"
+                "Add events with locations in Google Calendar.\n\n"
+                "<i>— AI-Commute via OpenClaw</i>"
             )
             return
 
-        # Step 5: Get weather
-        weather = await get_bangalore_weather()
-        avoid_modes = get_weather_mode_overrides(weather)
-
-        # Step 6: Get routes for all appointments
+        # Step 5: Build all_routes for reasoning
         all_routes = {}
-        for appt in appointments:
-            routes = await get_route_options(
-                origin=user_location,
-                destination=appt.location,
-                departure_time=appt.start_time - timedelta(hours=1),
-                preferences=DEFAULT_PREFERENCES,
-                weather_avoid_modes=avoid_modes,
-            )
-            all_routes[appt.id] = routes
+        for a in appointments:
+            route_data = context["routes"].get(a.id, [])
+            from models import RouteOption
+            all_routes[a.id] = [
+                RouteOption(
+                    mode=r["mode"],
+                    duration_minutes=r["duration_minutes"],
+                    distance_km=r["distance_km"],
+                    cost_inr=r["cost_inr"],
+                    steps=r.get("steps", []),
+                    departure_time=datetime.fromisoformat(r["departure_time"]),
+                    arrival_time=datetime.fromisoformat(r["arrival_time"]),
+                )
+                for r in route_data
+            ]
 
-        # Step 7: Full day Groq reasoning
+        # Step 6: Weather from context
+        weather = context["weather"]
+        weather["advisory"] = weather.get("advisory")
+
+        # Step 7: Groq full day reasoning
         day_plan = await reason_full_day(
             appointments, all_routes, weather, DEFAULT_PREFERENCES
         )
 
-        # Step 8: Send morning briefing
+        # Override feasibility with OpenClaw computed score
+        day_plan.feasibility_score = context["feasibility_score"]
+
+        # Step 8: Add OpenClaw detected conflicts
+        openclaw_conflicts = [c["message"] for c in context["conflicts"]]
+        if openclaw_conflicts:
+            day_plan.conflicts = openclaw_conflicts + day_plan.conflicts
+
+        # Step 9: Send morning briefing
         await send_morning_briefing(day_plan)
 
-        # Step 9: Send conflict alerts
-        for i, conflict in enumerate(day_plan.conflicts):
-            if i < len(appointments):
-                await send_conflict_alert(conflict, appointments[i].title)
+        # Step 10: Send conflict alerts
+        for i, conflict in enumerate(day_plan.conflicts[:2]):
+            appt_title = appointments[min(i, len(appointments)-1)].title
+            await send_conflict_alert(conflict, appt_title)
 
-        # Step 10: Schedule departure alerts
+        # Step 11: Schedule departure alerts
         for appt in appointments:
             schedule_departure_alert(
-                appt, all_routes.get(appt.id, []), weather, user_location
+                appt,
+                all_routes.get(appt.id, []),
+                weather,
+                user_location,
             )
 
-        print("[Scheduler] Morning analysis complete ✅")
+        print(f"[Scheduler] Morning analysis complete ✅")
+        print(f"[Scheduler] OpenClaw cycles run: {context['meta']['cycle']}")
 
     except Exception as e:
-        print(f"[Scheduler] Morning analysis error: {e}")
+        print(f"[Scheduler] Error: {e}")
         import traceback
         traceback.print_exc()
 

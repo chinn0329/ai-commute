@@ -1,0 +1,63 @@
+{
+  "skill": "commuteiq",
+  "version": "1.0.0",
+  "description": "AI day logistics agent for Bangalore professionals",
+  "openclaw_version": "2026.3.20",
+  "agent": {
+    "model": "groq/llama-3.3-70b-versatile",
+    "optimization": "fastest"
+  },
+  "connectors": [
+    {
+      "name": "google_calendar",
+      "type": "oauth2",
+      "scope": "https://www.googleapis.com/auth/calendar.readonly",
+      "description": "Reads user appointments, locations and times"
+    },
+    {
+      "name": "tomtom_traffic",
+      "type": "api_key",
+      "base_url": "https://api.tomtom.com",
+      "endpoints": [
+        "routing/1/calculateRoute",
+        "search/2/geocode"
+      ],
+      "description": "Live Bangalore traffic and route calculation"
+    },
+    {
+      "name": "openweathermap",
+      "type": "api_key",
+      "base_url": "https://api.openweathermap.org/data/2.5",
+      "description": "Bangalore weather for route mode switching"
+    },
+    {
+      "name": "groq_llm",
+      "type": "api_key",
+      "model": "llama-3.3-70b-versatile",
+      "description": "Full day logistics reasoning engine"
+    },
+    {
+      "name": "telegram",
+      "type": "bot_token",
+      "description": "Alert delivery and two-way user interaction"
+    }
+  ],
+  "context_assembly": {
+    "trigger": "cron(0 5 * * *)",
+    "recheck_interval_minutes": 10,
+    "alert_before_minutes": 30,
+    "conflict_threshold_minutes": 15,
+    "reroute_threshold_minutes": 15
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "pairing",
+      "commands": ["/start", "/analyse", "/status", "/help"],
+      "reply_actions": {
+        "1": "leave_early",
+        "2": "reschedule_meeting",
+        "3": "user_handles"
+      }
+    }
+  }
+}
